@@ -1,0 +1,59 @@
+appId: com.nowaves.app
+productName: no waves
+artifactName: ${productName} Setup ${version}.${ext}
+compression: maximum
+asar: true
+electronLanguages:
+  - en-US
+  - ru
+directories:
+  output: dist
+  buildResources: build
+
+publish:
+  provider: github
+  owner: netsgod
+  repo: no-waves
+  releaseType: release
+
+files:
+  - main.js
+  - preload.js
+  - package.json
+  - icon.ico
+  - node_modules/dotenv/**/*
+  - node_modules/electron-updater/**/*
+  - node_modules/builder-util-runtime/**/*
+  - node_modules/js-yaml/**/*
+  - node_modules/lazy-val/**/*
+  - node_modules/semver/**/*
+  - node_modules/lodash.escaperegexp/**/*
+  - node_modules/fs-extra/**/*
+  - node_modules/jsonfile/**/*
+  - node_modules/universalify/**/*
+
+win:
+  target:
+    - nsis
+  icon: icon.ico
+
+extraMetadata:
+  description: Публичная клиентская оболочка no waves
+  author: noryn
+  dependencies:
+    dotenv: ^17.2.1
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  installerIcon: icon.ico
+  uninstallerIcon: icon.ico
+  installerHeaderIcon: icon.ico
+  # красивый баннер сверху
+  installerHeader: build/installerHeader.bmp
+  # картинка сбоку (современно выглядит)
+  installerSidebar: build/sidebar.bmp
+  include: build/installer.nsh

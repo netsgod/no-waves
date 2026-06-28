@@ -1,0 +1,27 @@
+{
+  "name": "nowaves",
+  "version": "1.0.0",
+  "description": "Публичная клиентская оболочка no waves",
+  "main": "main.js",
+  "scripts": {
+    "start": "node start.js",
+    "dist": "electron-builder --win",
+    "release": "electron-builder --win --publish always"
+  },
+  "keywords": [],
+  "author": "noryn",
+  "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/netsgod/no-waves.git"
+  },
+  "type": "commonjs",
+  "devDependencies": {
+    "electron": "^39.0.0",
+    "electron-builder": "^26.0.12"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.1",
+    "electron-updater": "^6.3.9"
+  }
+}
