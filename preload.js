@@ -9,5 +9,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   minimize: () => ipcRenderer.send('window:minimize'),
   close: () => ipcRenderer.send('window:close'),
   openTelegramAuth: () => ipcRenderer.send('open-telegram-auth'),
-  openTogetherFirewall: () => ipcRenderer.invoke('open-together-firewall')
+  openTogetherFirewall: () => ipcRenderer.invoke('open-together-firewall'),
+  updateDiscordPresence: (payload) => ipcRenderer.send('discord:update-presence', payload),
+  clearDiscordPresence: () => ipcRenderer.send('discord:clear-presence')
 });

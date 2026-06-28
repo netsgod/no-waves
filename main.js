@@ -6,6 +6,7 @@ const { autoUpdater } = require('electron-updater');
 const fs = require('fs');
 const http = require('http');
 const https = require('https');
+const net = require('net');
 const path = require('path');
 
 const RELEASE_SERVER_URL = 'http://64.188.73.238:8080';
@@ -19,6 +20,10 @@ const UPDATE_REPO_OWNER = 'netsgod';
 const UPDATE_REPO_NAME = 'no-waves';
 const UPDATE_POLL_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const SESSION_REVALIDATE_INTERVAL_MS = 15 * 60 * 1000;
+const DISCORD_RPC_CLIENT_ID = String(process.env.NOWAVES_DISCORD_CLIENT_ID || '').trim();
+const DISCORD_RPC_ASSET_KEY = String(process.env.NOWAVES_DISCORD_ASSET_KEY || 'icon').trim() || 'icon';
+const DISCORD_RPC_ASSET_TEXT = String(process.env.NOWAVES_DISCORD_ASSET_TEXT || 'no waves').trim() || 'no waves';
+const DISCORD_RPC_RECONNECT_MS = 15000;
 let embeddedServerModule = null;
 let mainWindow = null;
 let updateCheckInProgress = false;
@@ -292,6 +297,290 @@ async function validateSavedToken(targetUrl, token) {
     });
 }
 
+class DiscordPresenceBridge {
+    constructor() {
+        this.socket = null;
+        this.buffer = Buffer.alloc(0);
+        this.connected = false;
+        this.connecting = false;
+        this.pendingActivity = null;
+        this.retryTimer = null;
+    }
+
+    isEnabled() {
+        return Boolean(DISCORD_RPC_CLIENT_ID);
+    }
+
+    createNonce() {
+        return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    }
+
+    getPipePaths() {
+        if (process.platform === 'win32') {
+            return Array.from({ length: 10 }, (_, index) => `\\\\?\\pipe\\discord-ipc-${index}`);
+        }
+
+        return Array.from({ length: 10 }, (_, index) => path.join(process.env.XDG_RUNTIME_DIR || '/tmp', `discord-ipc-${index}`));
+    }
+
+    sendFrame(opcode, payload) {
+        if (!this.socket) {
+            return;
+        }
+
+        const body = Buffer.from(JSON.stringify(payload), 'utf8');
+        const header = Buffer.alloc(8);
+        header.writeInt32LE(opcode, 0);
+        header.writeInt32LE(body.length, 4);
+        this.socket.write(Buffer.concat([header, body]));
+    }
+
+    handleFrame(opcode, payload) {
+        if (opcode === 3) {
+            this.sendFrame(4, payload);
+            return;
+        }
+
+        if (opcode !== 1 || !payload || typeof payload !== 'object') {
+            return;
+        }
+
+        if (payload.evt === 'READY') {
+            this.connected = true;
+            if (this.pendingActivity !== undefined) {
+                this.flushActivity();
+            }
+        }
+    }
+
+    handleSocketData(chunk) {
+        this.buffer = Buffer.concat([this.buffer, chunk]);
+
+        while (this.buffer.length >= 8) {
+            const opcode = this.buffer.readInt32LE(0);
+            const length = this.buffer.readInt32LE(4);
+            if (this.buffer.length < 8 + length) {
+                return;
+            }
+
+            const rawPayload = this.buffer.slice(8, 8 + length).toString('utf8');
+            this.buffer = this.buffer.slice(8 + length);
+
+            try {
+                this.handleFrame(opcode, JSON.parse(rawPayload));
+            } catch {
+                // ignore malformed IPC frames
+            }
+        }
+    }
+
+    scheduleReconnect() {
+        if (!this.pendingActivity || this.retryTimer || !this.isEnabled()) {
+            return;
+        }
+
+        this.retryTimer = setTimeout(() => {
+            this.retryTimer = null;
+            this.connect().catch(() => {});
+        }, DISCORD_RPC_RECONNECT_MS);
+    }
+
+    resetConnection() {
+        this.connected = false;
+        this.connecting = false;
+        this.buffer = Buffer.alloc(0);
+
+        if (this.socket) {
+            try {
+                this.socket.removeAllListeners();
+                this.socket.destroy();
+            } catch {}
+        }
+
+        this.socket = null;
+        this.scheduleReconnect();
+    }
+
+    async connect() {
+        if (!this.isEnabled() || this.connected || this.connecting) {
+            return;
+        }
+
+        this.connecting = true;
+        const pipePaths = this.getPipePaths();
+        let connectedSocket = null;
+
+        for (const pipePath of pipePaths) {
+            try {
+                connectedSocket = await new Promise((resolve, reject) => {
+                    const socket = net.createConnection(pipePath);
+                    const cleanup = () => {
+                        socket.removeListener('connect', onConnect);
+                        socket.removeListener('error', onError);
+                    };
+                    const onConnect = () => {
+                        cleanup();
+                        resolve(socket);
+                    };
+                    const onError = (error) => {
+                        cleanup();
+                        try {
+                            socket.destroy();
+                        } catch {}
+                        reject(error);
+                    };
+
+                    socket.once('connect', onConnect);
+                    socket.once('error', onError);
+                });
+                break;
+            } catch {}
+        }
+
+        if (!connectedSocket) {
+            this.connecting = false;
+            this.scheduleReconnect();
+            return;
+        }
+
+        this.socket = connectedSocket;
+        this.buffer = Buffer.alloc(0);
+        this.connecting = false;
+        this.connected = false;
+
+        connectedSocket.on('data', (chunk) => this.handleSocketData(chunk));
+        connectedSocket.on('error', () => this.resetConnection());
+        connectedSocket.on('close', () => this.resetConnection());
+
+        this.sendFrame(0, {
+            v: 1,
+            client_id: DISCORD_RPC_CLIENT_ID
+        });
+    }
+
+    buildActivity(payload) {
+        const title = String(payload?.title || '').trim().slice(0, 128);
+        if (!title) {
+            return null;
+        }
+
+        const artist = String(payload?.artist || '').trim().slice(0, 128);
+        const pitch = Number(payload?.pitchShift);
+        const artworkUrl = String(payload?.artworkUrl || '').trim();
+        const stateParts = [];
+
+        if (artist) {
+            stateParts.push(artist);
+        }
+        if (Number.isFinite(pitch) && pitch !== 0) {
+            stateParts.push(`pitch ${pitch > 0 ? '+' : ''}${pitch}`);
+        }
+
+        let resolvedArtworkUrl = '';
+        if (artworkUrl) {
+            try {
+                const parsed = new URL(artworkUrl);
+                if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+                    resolvedArtworkUrl = parsed.toString();
+                }
+            } catch {}
+        }
+
+        const currentTime = Number(payload?.currentTime);
+        const duration = Number(payload?.duration);
+        const canShowTimer = Boolean(payload?.isPlaying) && Number.isFinite(currentTime) && Number.isFinite(duration) && duration > 0;
+        const startTimestamp = canShowTimer ? Math.floor((Date.now() - (currentTime * 1000)) / 1000) : null;
+        const endTimestamp = canShowTimer ? Math.floor((Date.now() + Math.max(0, duration - currentTime) * 1000) / 1000) : null;
+
+        const state = stateParts.join(' • ').slice(0, 128);
+        const activity = {
+            details: title,
+            state: state || (payload?.isPlaying ? 'Listening in no waves' : 'Paused in no waves'),
+            assets: {
+                large_image: resolvedArtworkUrl || DISCORD_RPC_ASSET_KEY,
+                large_text: artist || title,
+                small_image: DISCORD_RPC_ASSET_KEY,
+                small_text: DISCORD_RPC_ASSET_TEXT
+            },
+            instance: false
+        };
+
+        if (canShowTimer && startTimestamp && endTimestamp) {
+            activity.timestamps = {
+                start: startTimestamp,
+                end: endTimestamp
+            };
+        }
+
+        return activity;
+    }
+
+    flushActivity() {
+        if (!this.socket || !this.connected) {
+            return;
+        }
+
+        this.sendFrame(1, {
+            cmd: 'SET_ACTIVITY',
+            args: {
+                pid: process.pid,
+                activity: this.pendingActivity
+            },
+            nonce: this.createNonce()
+        });
+    }
+
+    setActivity(payload) {
+        if (!this.isEnabled()) {
+            return;
+        }
+
+        this.pendingActivity = this.buildActivity(payload);
+        if (!this.socket || !this.connected) {
+            this.connect().catch(() => {});
+            return;
+        }
+
+        this.flushActivity();
+    }
+
+    clearActivity() {
+        if (!this.isEnabled()) {
+            return;
+        }
+
+        this.pendingActivity = null;
+        if (!this.socket || !this.connected) {
+            return;
+        }
+
+        this.flushActivity();
+    }
+
+    dispose() {
+        clearTimeout(this.retryTimer);
+        this.retryTimer = null;
+
+        try {
+            this.clearActivity();
+        } catch {}
+
+        if (this.socket) {
+            try {
+                this.socket.end();
+                this.socket.destroy();
+            } catch {}
+            this.socket = null;
+        }
+
+        this.connected = false;
+        this.connecting = false;
+        this.buffer = Buffer.alloc(0);
+    }
+}
+
+const discordPresenceBridge = new DiscordPresenceBridge();
+
 function getActiveWindow() {
     if (mainWindow && !mainWindow.isDestroyed()) {
         return mainWindow;
@@ -524,6 +813,12 @@ async function createWindow() {
         const ok = await checkForAppUpdates({ silent: false });
         return { ok };
     });
+    ipcMain.on('discord:update-presence', (_event, payload) => {
+        discordPresenceBridge.setActivity(payload);
+    });
+    ipcMain.on('discord:clear-presence', () => {
+        discordPresenceBridge.clearActivity();
+    });
 
     ipcMain.on('open-telegram-auth', () => {
         const oauthUrl =
@@ -561,6 +856,7 @@ app.on('activate', () => {
 app.on('before-quit', () => {
     clearInterval(sessionRevalidateTimer);
     clearInterval(updatePollTimer);
+    discordPresenceBridge.dispose();
     if (!embeddedServerModule || typeof embeddedServerModule.stopServer !== 'function') return;
     embeddedServerModule.stopServer().catch(() => {});
 });
