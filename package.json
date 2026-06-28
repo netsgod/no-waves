@@ -1,6 +1,6 @@
 {
   "name": "nowaves",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Публичная клиентская оболочка no waves",
   "main": "main.js",
   "scripts": {
