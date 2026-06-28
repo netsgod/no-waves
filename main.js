@@ -24,6 +24,8 @@ const DISCORD_RPC_CLIENT_ID = String(process.env.NOWAVES_DISCORD_CLIENT_ID || ''
 const DISCORD_RPC_ASSET_KEY = String(process.env.NOWAVES_DISCORD_ASSET_KEY || 'icon').trim() || 'icon';
 const DISCORD_RPC_ASSET_TEXT = String(process.env.NOWAVES_DISCORD_ASSET_TEXT || 'no waves').trim() || 'no waves';
 const DISCORD_RPC_RECONNECT_MS = 15000;
+const DESKTOP_APP_HEADER = 'X-NoWaves-App';
+const DESKTOP_APP_HEADER_VALUE = 'desktop';
 let embeddedServerModule = null;
 let mainWindow = null;
 let updateCheckInProgress = false;
@@ -194,6 +196,10 @@ async function openTogetherFirewall() {
 
     await openFirewallWithPowerShellFallback();
     return true;
+}
+
+async function openWindowsFirewallSettings() {
+    return execFileQuiet('control.exe', ['/name', 'Microsoft.WindowsFirewall']);
 }
 
 async function isServerReady(targetUrl) {
@@ -743,6 +749,39 @@ async function ensureEmbeddedServer() {
     }
 }
 
+function configureDesktopRequestHeaders(session, targetUrl) {
+    if (session.__nowavesDesktopHeaderConfigured) {
+        return;
+    }
+
+    let targetOrigin = '';
+    try {
+        targetOrigin = new URL(targetUrl).origin;
+    } catch {
+        return;
+    }
+
+    session.webRequest.onBeforeSendHeaders((details, callback) => {
+        try {
+            if (new URL(details.url).origin === targetOrigin) {
+                details.requestHeaders[DESKTOP_APP_HEADER] = DESKTOP_APP_HEADER_VALUE;
+            }
+        } catch {}
+
+        callback({ requestHeaders: details.requestHeaders });
+    });
+
+    session.__nowavesDesktopHeaderConfigured = true;
+}
+
+function buildRemotePageUrl(pagePath) {
+    const base = SERVER_URL.endsWith('/') ? SERVER_URL : `${SERVER_URL}/`;
+    const url = new URL(pagePath, base);
+    url.searchParams.set('desktopVersion', app.getVersion());
+    url.searchParams.set('ts', String(Date.now()));
+    return url.toString();
+}
+
 async function createWindow() {
     const win = new BrowserWindow({
         width: 1075,
@@ -774,6 +813,8 @@ async function createWindow() {
     }
 
     win.removeMenu();
+    configureDesktopRequestHeaders(win.webContents.session, SERVER_URL);
+    await win.webContents.session.clearCache().catch(() => {});
 
     const savedToken = readSavedToken();
     const hasValidToken = await validateSavedToken(SERVER_URL, savedToken);
@@ -782,9 +823,9 @@ async function createWindow() {
     }
 
     if (SKIP_AUTH || hasValidToken) {
-        win.loadURL(`${SERVER_URL}/index.html`);
+        win.loadURL(buildRemotePageUrl('index.html'));
     } else {
-        win.loadURL(`${SERVER_URL}/register.html`);
+        win.loadURL(buildRemotePageUrl('register.html'));
     }
 
     ipcMain.handle('save-token', async (event, newToken) => {
@@ -803,9 +844,10 @@ async function createWindow() {
             await openTogetherFirewall();
             return { ok: true };
         } catch (error) {
+            await openWindowsFirewallSettings().catch(() => false);
             return {
                 ok: false,
-                message: 'Could not open port 8080 automatically. Start no waves as administrator and create the room again.'
+                message: 'Не удалось добавить правило автоматически. Открыл настройки Windows Firewall, попробуй разрешить TCP 8080 вручную.'
             };
         }
     });
