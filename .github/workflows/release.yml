@@ -1,4 +1,4 @@
-name: Build Windows Release
+name: Publish Windows Release
 
 on:
   push:
@@ -10,22 +10,38 @@ permissions:
 
 jobs:
   release:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
+      - name: Derive version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Download release assets
+        run: |
+          curl -fL "https://nowaves.ru/latest.yml" -o latest.yml
+          curl -fL "https://nowaves.ru/no-waves-setup.exe" -o "no-waves-Setup-${VERSION}.exe"
+          curl -fL "https://nowaves.ru/no-waves-setup.exe.blockmap" -o "no-waves-Setup-${VERSION}.exe.blockmap"
+
+      - name: Validate latest.yml version
+        run: |
+          grep -q "^version: ${VERSION}$" latest.yml
 
       - name: Publish release
-        run: npm run release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ env.VERSION }}
+          generate_release_notes: false
+          body: |
+            no waves ${{ env.VERSION }}
+
+            - актуальный Windows-клиент
+            - свежий installer для сайта и автообновлений
+            - release-ассеты синхронизированы с серверной сборкой
+          files: |
+            latest.yml
+            no-waves-Setup-${{ env.VERSION }}.exe
+            no-waves-Setup-${{ env.VERSION }}.exe.blockmap
